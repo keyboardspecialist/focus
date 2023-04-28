@@ -87,11 +87,18 @@ find_font_by_name :: (name: string) -> path: string, error_msg: string /* temp *
 
     // Try to look it up in system fonts
     fonts_dir := platform_get_fonts_dir();
+    fonts_usr_dir := platform_get_user_fonts_dir();
 
     try_path(tprint("%/%", fonts_dir, name));
     if !has_extension {
         try_path(tprint("%/%.ttf", fonts_dir, name));
         try_path(tprint("%/%.otf", fonts_dir, name));
+    }
+
+    try_path(tprint("%/%", fonts_usr_dir, name));
+    if !has_extension {
+        try_path(tprint("%/%.ttf", fonts_usr_dir, name));
+        try_path(tprint("%/%.otf", fonts_usr_dir, name));
     }
 
     try_path :: (font_path: string) #expand {

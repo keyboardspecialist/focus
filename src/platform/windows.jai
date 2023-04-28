@@ -105,6 +105,11 @@ platform_get_fonts_dir :: () -> string {
     return "C:/Windows/Fonts";
 }
 
+//This is guaranteed wrong
+platform_get_user_fonts_dir :: () -> string {
+    return "C:/Users/" + get_user_name() + "/AppData/Local/Microsoft/Windows/Fonts";
+}
+
 platform_open_in_explorer :: (dir: string) {
     ShellExecuteW(window, utf8_to_wide("explore"), utf8_to_wide(dir), xx 0, xx 0, SW_NORMAL);
 }

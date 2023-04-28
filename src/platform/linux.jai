@@ -53,6 +53,10 @@ platform_get_fonts_dir :: () -> string {
     return "/usr/share/fonts";
 }
 
+platform_get_user_fonts_dir :: () -> string {
+    return "/~/.fonts";
+}
+
 platform_open_in_explorer :: (dir: string) {
     unimplemented();
 }

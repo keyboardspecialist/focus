@@ -54,6 +54,11 @@ platform_get_fonts_dir :: () -> string {
     return "/Library/Fonts";
 }
 
+//figure out how to get home dir
+platform_get_user_fonts_dir :: () -> string {
+    return "/Users/jason/Library/Fonts";
+}
+
 platform_open_in_explorer :: (dir: string) {
     // unimplemented();
 }
