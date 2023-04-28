@@ -34,7 +34,7 @@ Dynamic_Font :: struct {
     em_width:               int;
 
     y_offset_for_centering: int;
-
+    reversed: bool;  // True if this font is byte-order-reversed from its file....
     glyph_conversion_failed: bool;  // The most recent call to convert_to_temporary_glyphs() found a character it didn't know.
     glyph_index_for_unknown_character: u32;
 
@@ -42,8 +42,71 @@ Dynamic_Font :: struct {
     temporary_glyphs.allocator = temp;
 
     current_quads: [..] Font_Quad;
+
+    features: [..] Font_Feature;
+
+    feature_smallcaps:      *Font_Feature;
+    feature_ligatures:      *Font_Feature;
+    feature_lining_numbers: *Font_Feature;
+    feature_all_alts:      *Font_Feature;
+    feature_ctxual_alts:   *Font_Feature;
 }
 
+Font_Feature :: struct {
+    feature_tag: u32;
+    feature_tables_pointer: *u8;
+    expanded: bool;
+
+    lookup_lists:  [] u16;
+    lookup_tables: [] Font_Lookup_Table;
+};
+
+Font_Range_Record :: struct {
+    start, end: s32;
+    start_coverage_index: s32;
+};
+
+Font_Coverage_Table :: struct {
+    format: s64;
+
+    glyphs: [] u16;   // If format 1.
+    range_records: [] Font_Range_Record;  // If format 2.
+};
+
+Font_Lookup_Subtable :: struct {
+    format: s64;
+    coverage_table: *Font_Coverage_Table;
+
+    delta_glyph_id: s64;     // If lookup type 1, table format 1
+    glyphs: [] u16;          // If lookup type 1, table format 2
+    sequence_table: [] Font_Sequence_Table_Entry;       // If lookup type 2, table format 1
+
+    //generally how ligatures are done. some sequence of glyphs is replaced with a single glyph.
+    chain_sequence_tables: [] Font_Sequence_Table_Entry; // If lookup type 6, table format 1
+};
+
+Font_Chain_Sequence_Table_Entry :: struct {
+    backtrack: *Font_Sequence_Table_Entry;
+    input:     *Font_Sequence_Table_Entry;
+    lookahead: *Font_Sequence_Table_Entry;
+    lookup_records: [] Font_Lookup_Record;
+};
+
+Font_Lookup_Record :: struct {
+    sequence_index: u16;
+    lookup_list_index: u16;
+};
+
+Font_Sequence_Table_Entry :: struct {
+    glyphs: [] u16;
+};
+
+Font_Lookup_Table :: struct {
+    lookup_type:   s32;
+    lookup_flags:  u32;
+
+    subtables: [] Font_Lookup_Subtable;
+};
 
 Font_Page :: struct {
     texture:       Texture;
@@ -143,6 +206,55 @@ convert_to_temporary_glyphs :: (font: *Dynamic_Font, s: string) -> width_in_pixe
     return width_in_pixels;
 }
 
+// Dynamic_Font :: struct {
+//     name: string;
+//     face: FT_Face;
+//     glyph_lookup: Table(int, *Glyph_Data);
+
+//     character_height:       int;
+//     default_line_spacing:   int;
+//     max_ascender:           int;
+//     max_descender:          int;
+//     typical_ascender:       int;
+//     typical_descender:      int;
+//     em_width:               int;
+
+//     y_offset_for_centering: int;
+//     reversed: bool;  // True if this font is byte-order-reversed from its file....
+//     glyph_conversion_failed: bool;  // The most recent call to convert_to_temporary_glyphs() found a character it didn't know.
+//     glyph_index_for_unknown_character: u32;
+
+//     temporary_glyphs: [..] *Glyph_Data;
+//     temporary_glyphs.allocator = temp;
+
+//     current_quads: [..] Font_Quad;
+
+//     features: [..] Font_Feature;
+
+//     feature_smallcaps:      *Font_Feature;
+//     feature_ligatures:      *Font_Feature;
+//     feature_lining_numbers: *Font_Feature;
+// }
+
+#scope_file
+dbg_dump_font :: (font: *Dynamic_Font)
+{   
+    print("Font: %\n", font.name);
+    print("  Face: %\n", <<font.face);
+    print(" Family: %\n", <<font.face.family_name); 
+
+    feat: string = "abcd";
+    for * font.features {   feat[0] = xx it.feature_tag>>24&0xFF;
+                            feat[1] = xx it.feature_tag>>16&0xFF;
+                            feat[2] = xx it.feature_tag>>8&0xFF;
+                            feat[3] = xx it.feature_tag>>0&0xFF;
+                            print("  Feature: %\n", feat);
+                            print("lookup_tables: %\n", it.lookup_tables);
+                        }
+
+}
+#scope_module
+
 draw_code :: (font: *Dynamic_Font, x: s64, y: s64, char_size: float, line_height: float, visible_lines: [] Code_Line, color_map: [] Vector4, tab_size: s64 = 4) {
     // Setup OpenGL stuff. We do it all in one place because it's easier and there will be only one backend - GL.
     // Otherwise we would have to create temporary glyphs and pass them on to the backend draw function.
@@ -153,6 +265,8 @@ draw_code :: (font: *Dynamic_Font, x: s64, y: s64, char_size: float, line_height
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    dbg_dump_font(font);
 
     last_texture: GLuint = 0xFFFFFFFF;
 
@@ -405,6 +519,74 @@ load_font_part_2 :: (result: *Dynamic_Font, pixel_height: int) {
         if !success {
             log_error("Unable to set unknown character for font '%'.\n", basename);
         }
+    }
+  font := result;
+        
+    while 1 {
+        length : FT_ULong = 0;
+        tag := TTAG_GSUB;
+
+        error := FT_Load_Sfnt_Table(face, tag, 0, null, *length);
+        if error break;  // Not reall an error since not having a GSUB table is okay actually.
+        
+        buffer := alloc(cast(s64) length);
+        defer free(buffer);
+        if !buffer break;
+
+        error = FT_Load_Sfnt_Table(face, tag, 0, buffer, *length);
+        if (error) break;
+
+        reversed := false;
+        value := read4_from_offset(buffer, 0, reversed);
+
+        if value == 0x00000100 {
+            reversed = true;
+        } else if value != 0x00010000 {
+            break;
+        }
+
+        result.reversed = reversed;
+
+        script_offset  := read2_from_offset(buffer, 4, reversed);
+        feature_offset := read2_from_offset(buffer, 6, reversed);
+        lookup_offset  := read2_from_offset(buffer, 8, reversed);
+
+        //
+        // Feature tables...
+        //
+
+        feature_list_table := buffer + feature_offset;
+        num_feature_tables := cast(s32) read2_from_offset(feature_list_table, 0, reversed); // This must be signed since we do a -1 that can go below 0!
+
+        {
+            for 0..num_feature_tables-1 {
+                dest : Font_Feature;
+                dest.feature_tag = read4_from_offset(feature_list_table, 2 + xx it * 6, reversed);
+                offset := read2_from_offset(feature_list_table, 6 + xx it * 6, reversed);
+                dest.feature_tables_pointer = feature_list_table + offset;
+
+                array_add(*font.features, dest);
+            }
+        }
+
+
+        lookup_list_table := buffer + lookup_offset;
+
+        //font.feature_smallcaps = find_feature(font, "smcp");
+       // font.feature_ligatures = find_feature(font, "liga");
+       // font.feature_lining_numbers = find_feature(font, "lnum");
+       // font.feature_all_alts = find_feature(font, "aalt");
+        font.feature_ctxual_alts = find_feature(font, "calt");
+
+        // feature_gpos := find_feature(font, "gpos");
+
+       // expand_feature(font, font.feature_smallcaps, lookup_list_table);
+       // expand_feature(font, font.feature_lining_numbers, lookup_list_table);
+      //  expand_feature(font, font.feature_ligatures, lookup_list_table);
+     //   expand_feature(font, font.feature_all_alts, lookup_list_table);
+        expand_feature(font, font.feature_ctxual_alts, lookup_list_table);
+
+        break;
     }
 
     array_add(*dynamic_fonts, result);
@@ -769,6 +951,175 @@ temporary_array_reset :: (array: *[..] $T) {
     array.count     = 0;
     array.allocated = 0;
     array.data      = null;
+}
+
+read4_from_offset :: /* inline */ (base: *u8, offset: s64, reversed: bool) -> u32 #expand {  // Would like to inline, but, can't due to #asm in byte_swap.
+    ptr := cast(*u32) (base + offset);
+    
+    if reversed {
+        return byte_swap(<< ptr);
+    } else {
+        return << ptr;
+    }
+}
+
+read2_from_offset :: /* inline */ (base: *u8, offset: s64, reversed: bool) -> u16 {  // Would like to inline, but, can't due to #asm in byte_swap.
+    ptr := cast(*u16) (base + offset);
+    
+    if reversed {
+        return byte_swap(<< ptr);
+    } else {
+        return << ptr;
+    }
+}
+
+find_feature :: (using font: *Dynamic_Font, feature_label: string) -> *Font_Feature {
+    s0 : u32 = feature_label[0];
+    s1 : u32 = feature_label[1];
+    s2 : u32 = feature_label[2];
+    s3 : u32 = feature_label[3];
+    
+    tag := s3 | (s2 << 8) | (s1 << 16) | (s0 << 24);
+
+    for * features  if it.feature_tag == tag return it;
+
+    return null;
+}
+
+read_coverage_table :: (coverage_table: *u8, reversed: bool) -> *Font_Coverage_Table {
+    format := read2_from_offset(coverage_table, 0, reversed);
+
+    result := New(Font_Coverage_Table);
+    result.format = format;
+
+    if format == 1 {
+        num_glyphs := read2_from_offset(coverage_table, 2, reversed);
+
+        glyphs := NewArray(num_glyphs, u16);
+        if !glyphs.data return null;
+
+        for 0..num_glyphs-1 {
+            glyphs[it] = read2_from_offset(coverage_table + 4, xx it * 2, reversed);
+        }
+
+        result.glyphs = glyphs;
+    } else if format == 2 {
+        num_records := read2_from_offset(coverage_table, 2, reversed);
+        result.range_records = NewArray(num_records, Font_Range_Record);
+        
+        for * result.range_records {
+            i := it_index;
+
+            it.start = read2_from_offset(coverage_table, 4 + i * 6, reversed);
+            it.end = read2_from_offset(coverage_table, 6 + i * 6, reversed);
+            it.start_coverage_index = read2_from_offset(coverage_table, 8 + i * 6, reversed);
+        }
+    }
+    
+    return result;
+}
+
+read_sequence_table_entry :: (result: *Font_Sequence_Table_Entry, sequence_table: *u8, reversed: bool) {
+    num_glyphs := read2_from_offset(sequence_table, 0, reversed);
+
+    result.glyphs = NewArray(num_glyphs, u16, false);
+    if !result.glyphs.data return;
+
+    for 0..num_glyphs-1
+        result.glyphs[it] = read2_from_offset(sequence_table + 2, cast(s64) it * 2, reversed);
+}
+
+
+expand_feature :: (using font: *Dynamic_Font, feature: *Font_Feature, lookup_list_table: *u8) {
+    if !feature return;
+    if feature.expanded return;
+
+    feature.expanded = true;
+
+    table := feature.feature_tables_pointer;
+
+    params_offset := read2_from_offset(table, 0, reversed);
+
+    num_lookup_lists : s64 = read2_from_offset(table, 2, reversed);
+
+    feature.lookup_lists = NewArray(num_lookup_lists, u16, false);
+
+    for 0..num_lookup_lists-1 {
+        index := 4 + it * 2;
+        feature.lookup_lists[it] = read2_from_offset(table, index, reversed);
+    }
+
+    feature.lookup_tables = NewArray(num_lookup_lists, Font_Lookup_Table);
+
+    //
+    // Lookup tables...
+    //
+
+    num_lookups_max := read2_from_offset(lookup_list_table, 0, reversed);
+
+    for 0..num_lookup_lists-1 {
+        dest := *feature.lookup_tables[it];
+        list_index := feature.lookup_lists[it];
+
+        assert(list_index < num_lookups_max);
+
+        offset := read2_from_offset(lookup_list_table + 2, 2 * list_index, reversed);
+
+        table := lookup_list_table + offset;
+
+        lookup_type    := read2_from_offset(table, 0, reversed);
+        lookup_flags   := read2_from_offset(table, 2, reversed);
+        subtable_count := read2_from_offset(table, 4, reversed);
+
+        dest.lookup_type   = lookup_type;
+        dest.lookup_flags  = lookup_flags;
+
+        dest.subtables = NewArray(subtable_count, Font_Lookup_Subtable);
+        for * sub_dest : dest.subtables {
+            offset := 6 + it_index * 2;
+            subtable_offset := read2_from_offset(table, offset, reversed);
+            
+            subtable   := table + subtable_offset;
+            table_type := read2_from_offset(subtable, 0, reversed);
+            sub_dest.format = table_type;
+            
+            if lookup_type == 1 {  // Single Substitution Table
+                coverage_offset := read2_from_offset(subtable, 2, reversed);
+                coverage_table := subtable + coverage_offset;
+                sub_dest.coverage_table = read_coverage_table(coverage_table, reversed);
+
+                if table_type == 1 {  // SingleSubstFormat1
+                    sub_dest.delta_glyph_id = read2_from_offset(subtable, 4, reversed);
+                } else if table_type == 2 { // SingleSubstFormat2
+
+                    count : s64 = read2_from_offset(subtable, 4, reversed);
+                    sub_dest.glyphs = NewArray(count, u16);
+
+                    for * sub_dest.glyphs {
+                         << it = read2_from_offset(subtable, 6 + 2 * it_index, reversed);
+                    }
+                } else {
+                    assert(false);
+                }
+            } else if lookup_type == 2 {  // Multiple Substitution Table
+
+                coverage_offset := read2_from_offset(subtable, 2, reversed);
+                sequence_count := read2_from_offset(subtable, 4, reversed);
+                coverage_table := subtable + coverage_offset;
+
+                sub_dest.coverage_table = read_coverage_table(coverage_table, reversed);
+                sub_dest.sequence_table = NewArray(sequence_count, Font_Sequence_Table_Entry);
+
+                for j : 0..sequence_count-1 {
+                    sequence_offset := read2_from_offset(subtable + 6, cast(s64) j * 2, reversed);
+                    sequence_table := subtable + sequence_offset;
+                    read_sequence_table_entry(*sub_dest.sequence_table[j], sequence_table, reversed);
+                }
+            }
+        }
+
+        break;
+    }
 }
 
 #import "freetype-2.12.1";
