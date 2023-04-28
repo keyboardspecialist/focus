@@ -73,25 +73,6 @@ Font_Coverage_Table :: struct {
     range_records: [] Font_Range_Record;  // If format 2.
 };
 
-Font_Lookup_Subtable :: struct {
-    format: s64;
-    coverage_table: *Font_Coverage_Table;
-
-    delta_glyph_id: s64;     // If lookup type 1, table format 1
-    glyphs: [] u16;          // If lookup type 1, table format 2
-    sequence_table: [] Font_Sequence_Table_Entry;       // If lookup type 2, table format 1
-
-    //generally how ligatures are done. some sequence of glyphs is replaced with a single glyph.
-    chain_sequence_tables: [] Font_Sequence_Table_Entry; // If lookup type 6, table format 1
-};
-
-Font_Chain_Sequence_Table_Entry :: struct {
-    backtrack: *Font_Sequence_Table_Entry;
-    input:     *Font_Sequence_Table_Entry;
-    lookahead: *Font_Sequence_Table_Entry;
-    lookup_records: [] Font_Lookup_Record;
-};
-
 Font_Lookup_Record :: struct {
     sequence_index: u16;
     lookup_list_index: u16;
@@ -106,6 +87,34 @@ Font_Lookup_Table :: struct {
     lookup_flags:  u32;
 
     subtables: [] Font_Lookup_Subtable;
+};
+
+Font_Lookup_Subtable :: struct {
+    format: s64;
+    coverage_table: *Font_Coverage_Table;
+
+    delta_glyph_id: s64;     // If lookup type 1, table format 1
+    glyphs: [] u16;          // If lookup type 1, table format 2
+    sequence_table: [] Font_Sequence_Table_Entry;       // If lookup type 2, table format 1
+    
+    //generally how ligatures are done. some sequence of glyphs is replaced with a single glyph.
+    chained_sequence_tables: [] Font_Chained_Sequence_Table_Entry; // If lookup type 6, table format 1
+};
+
+Font_Chained_Sequence_Table_Entry :: struct {
+    //format 1
+    backtrack: Font_Sequence_Table_Entry;
+    input:     Font_Sequence_Table_Entry;
+    lookahead: Font_Sequence_Table_Entry;
+    //format 2
+    //@NOTE: I'll look at this later
+    //format 3
+    backtrack_coverages: [] Font_Coverage_Table;
+    input_coverages:     [] Font_Coverage_Table;
+    lookahead_coverages: [] Font_Coverage_Table;
+
+
+    lookup_records: [] Font_Lookup_Record;
 };
 
 Font_Page :: struct {
@@ -1115,10 +1124,88 @@ expand_feature :: (using font: *Dynamic_Font, feature: *Font_Feature, lookup_lis
                     sequence_table := subtable + sequence_offset;
                     read_sequence_table_entry(*sub_dest.sequence_table[j], sequence_table, reversed);
                 }
+            } else if lookup_type == 6 { //chained sequence
+                expand_chained_sequence(sub_dest, subtable, reversed);
             }
         }
 
         break;
+    }
+}
+
+expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: *u8, reversed: bool) {
+    if sub_dest.format == {
+        case 1; //simple glyph context. Berkeley Mono uses this format
+            print("Found chained sequence lookup\n");
+            coverage_offset := read2_from_offset(chained_seq_table, 2, reversed);
+            coverage_table := chained_seq_table + coverage_offset;
+            sub_dest.coverage_table = read_coverage_table(coverage_table, reversed);
+            chained_seq_ruleset_count := read2_from_offset(chained_seq_table, 4, reversed);
+            print("Coverage table format: %\n", <<sub_dest.coverage_table);
+            //   chained_seq_ruleset_offsets := NewArray(chained_seq_ruleset_count, u16);
+
+            //The amount of glyphs in the coverage table should match the amount of rulesets
+            //extras in either case are ignored
+            //rulesets and coverage table order should match
+            print("chained_seq_ruleset_count: %\n", chained_seq_ruleset_count);
+            for 0..chained_seq_ruleset_count-1 {
+                offset := read2_from_offset(chained_seq_table, 6 + it * 2, reversed);
+                ruleset_table := chained_seq_table + offset;
+                print("ruleset_table: %\n", offset);
+                rule_count := read2_from_offset(ruleset_table, 0, reversed);
+                print("rule_count: %\n", rule_count);
+                sub_dest.chained_sequence_tables = NewArray(rule_count, Font_Chained_Sequence_Table_Entry);
+                for * sub_dest.chained_sequence_tables {
+                    read_sequence_table_entry(*it.backtrack, ruleset_table + 2, reversed);
+                    //input is odd, skip the first glyph??
+                    read_sequence_table_entry(*it.input, ruleset_table + 2 + it.backtrack.glyphs.count * 2, reversed);
+                    read_sequence_table_entry(*it.lookahead, ruleset_table + 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2, reversed);
+                    lookup_count := read2_from_offset(ruleset_table, 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2 + 2 + it.lookahead.glyphs.count * 2, reversed);
+                    it.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
+                    lookup_table := 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2 + 2 + it.lookahead.glyphs.count * 2 ;
+                    for * it.lookup_records {
+                        it.sequence_index = read2_from_offset(ruleset_table, lookup_table + it_index * 2, reversed);
+                        it.lookup_list_index = read2_from_offset(ruleset_table, lookup_table + lookup_count * 2 + it_index * 2, reversed);
+                    }
+                }
+
+            }
+        case 2; //class-based glyph context
+
+        case 3; //coverage-based glyph context. Fira Code uses this format
+        print("Found chained sequence lookup FORMAT 3\n");
+            sub_dest.chained_sequence_tables = NewArray(1, Font_Chained_Sequence_Table_Entry);
+            dest := *sub_dest.chained_sequence_tables[0];
+            backtrack_count := read2_from_offset(chained_seq_table, 2, reversed);
+            dest.backtrack_coverages = NewArray(backtrack_count, Font_Coverage_Table);
+            for 0..backtrack_count-1 {
+                print("read backtrack coverage table\n");
+                dest.backtrack_coverages[it] = read_coverage_table(chained_seq_table + 2 + it * 2, reversed);
+            }
+            print("backtrack_count: %\n", backtrack_count);
+            input_table := chained_seq_table + 2 + backtrack_count * 2;
+            input_count := read2_from_offset(input_table, 0, reversed);
+            print("input_count: %\n", input_count);
+            dest.input_coverages = NewArray(input_count, Font_Coverage_Table);
+            for 0..input_count-1 {
+                dest.input_coverages[it] = read_coverage_table(input_table + 2 + it * 2, reversed);
+                print("input coverage table: %\n", dest.input_coverages[it]);
+            }
+            
+            lookahead_table := input_table + 2 + input_count * 2;
+            lookahead_count := read2_from_offset(lookahead_table, 0, reversed);
+            dest.lookahead_coverages = NewArray(lookahead_count, Font_Coverage_Table);
+            for 0..lookahead_count-1 {
+                dest.lookahead_coverages[it] = read_coverage_table(lookahead_table + 2 + it * 2, reversed);
+            }
+            lookup_table := lookahead_table + 2 + lookahead_count * 2;
+            lookup_count := read2_from_offset(lookup_table, 0, reversed);
+            dest.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
+            for * dest.lookup_records {
+                it.sequence_index = read2_from_offset(lookup_table, it_index * 2, reversed);
+                it.lookup_list_index = read2_from_offset(lookup_table, lookup_count * 2 + it_index * 2, reversed);
+            }
+
     }
 }
 
