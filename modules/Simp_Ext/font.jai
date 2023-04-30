@@ -581,10 +581,10 @@ load_font_part_2 :: (result: *Dynamic_Font, pixel_height: int) {
 
         lookup_list_table := buffer + lookup_offset;
 
-        //font.feature_smallcaps = find_feature(font, "smcp");
+        font.feature_smallcaps = find_feature(font, "smcp");
        // font.feature_ligatures = find_feature(font, "liga");
-       // font.feature_lining_numbers = find_feature(font, "lnum");
-       // font.feature_all_alts = find_feature(font, "aalt");
+        font.feature_lining_numbers = find_feature(font, "lnum");
+        font.feature_all_alts = find_feature(font, "aalt");
         font.feature_ctxual_alts = find_feature(font, "calt");
 
         // feature_gpos := find_feature(font, "gpos");
@@ -592,7 +592,7 @@ load_font_part_2 :: (result: *Dynamic_Font, pixel_height: int) {
        // expand_feature(font, font.feature_smallcaps, lookup_list_table);
        // expand_feature(font, font.feature_lining_numbers, lookup_list_table);
       //  expand_feature(font, font.feature_ligatures, lookup_list_table);
-     //   expand_feature(font, font.feature_all_alts, lookup_list_table);
+        expand_feature(font, font.feature_all_alts, lookup_list_table);
         expand_feature(font, font.feature_ctxual_alts, lookup_list_table);
 
         break;
@@ -1003,7 +1003,6 @@ read_coverage_table :: (coverage_table: *u8, reversed: bool) -> *Font_Coverage_T
 
     if format == 1 {
         num_glyphs := read2_from_offset(coverage_table, 2, reversed);
-
         glyphs := NewArray(num_glyphs, u16);
         if !glyphs.data return null;
 
@@ -1046,11 +1045,8 @@ expand_feature :: (using font: *Dynamic_Font, feature: *Font_Feature, lookup_lis
     feature.expanded = true;
 
     table := feature.feature_tables_pointer;
-
     params_offset := read2_from_offset(table, 0, reversed);
-
     num_lookup_lists : s64 = read2_from_offset(table, 2, reversed);
-
     feature.lookup_lists = NewArray(num_lookup_lists, u16, false);
 
     for 0..num_lookup_lists-1 {
@@ -1059,7 +1055,6 @@ expand_feature :: (using font: *Dynamic_Font, feature: *Font_Feature, lookup_lis
     }
 
     feature.lookup_tables = NewArray(num_lookup_lists, Font_Lookup_Table);
-print("Lookup tables: %\n", num_lookup_lists);
     //
     // Lookup tables...
     //
@@ -1135,30 +1130,26 @@ print("Lookup tables: %\n", num_lookup_lists);
 
 expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: *u8, reversed: bool) {
     if sub_dest.format == {
-        case 1; //simple glyph context. Berkeley Mono uses this format
+        case 1; //simple glyph context. Berkeley Mono uses this format, mostly
        //     print("Found chained sequence lookup\n");
             coverage_offset := read2_from_offset(chained_seq_table, 2, reversed);
             coverage_table := chained_seq_table + coverage_offset;
             sub_dest.coverage_table = read_coverage_table(coverage_table, reversed);
             chained_seq_ruleset_count := read2_from_offset(chained_seq_table, 4, reversed);
-        //    print("Coverage table format: %\n", <<sub_dest.coverage_table);
             //   chained_seq_ruleset_offsets := NewArray(chained_seq_ruleset_count, u16);
 
             //The amount of glyphs in the coverage table should match the amount of rulesets
             //extras in either case are ignored
             //rulesets and coverage table order should match
-       //     print("chained_seq_ruleset_count: %\n", chained_seq_ruleset_count);
             for 0..chained_seq_ruleset_count-1 {
                 offset := read2_from_offset(chained_seq_table, 6 + it * 2, reversed);
                 ruleset_table := chained_seq_table + offset;
-       //         print("ruleset_table: %\n", offset);
                 rule_count := read2_from_offset(ruleset_table, 0, reversed);
-       //         print("rule_count: %\n", rule_count);
                 sub_dest.chained_sequence_tables = NewArray(rule_count, Font_Chained_Sequence_Table_Entry);
                 for * sub_dest.chained_sequence_tables {
                     read_sequence_table_entry(*it.backtrack, ruleset_table + 2, reversed);
                     //input is odd, skip the first glyph??
-                    read_sequence_table_entry(*it.input, ruleset_table + 2 + it.backtrack.glyphs.count * 2, reversed);
+                    read_sequence_table_entry(*it.input, ruleset_table + 4 + it.backtrack.glyphs.count * 2, reversed);
                     read_sequence_table_entry(*it.lookahead, ruleset_table + 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2, reversed);
                     lookup_count := read2_from_offset(ruleset_table, 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2 + 2 + it.lookahead.glyphs.count * 2, reversed);
                     it.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
@@ -1174,35 +1165,32 @@ expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: 
             print("Found chained sequence lookup FORMAT 2\n");
             assert(false);
 
-        case 3; //coverage-based glyph context. Fira Code uses this format
-        print("Found chained sequence lookup FORMAT 3\n");
+        case 3; //coverage-based glyph context. Fira Code uses this format exclusively
             sub_dest.chained_sequence_tables = NewArray(1, Font_Chained_Sequence_Table_Entry);
             dest := *sub_dest.chained_sequence_tables[0];
             backtrack_count := read2_from_offset(chained_seq_table, 2, reversed);
             dest.backtrack_coverages = NewArray(backtrack_count, Font_Coverage_Table);
-            print("backtrack count: %\n", backtrack_count);
             if backtrack_count for 0..backtrack_count-1 {
-                print("read backtrack coverage table\n");
-                print("backtrack offset: %\n", 4 + it * 2);
-                dest.backtrack_coverages[it] = read_coverage_table(chained_seq_table + 4 + it * 2, reversed);
-                print("backtrack coverage table: %\n", dest.backtrack_coverages[it]);
+                offs := read2_from_offset(chained_seq_table, 4 + it * 2, reversed);
+                tbl := chained_seq_table + offs;
+                dest.backtrack_coverages[it] = read_coverage_table(tbl, reversed);
             }
-            print("backtrack_count: %\n", backtrack_count);
             input_table := chained_seq_table + 4 + backtrack_count * 2;
             input_count := read2_from_offset(input_table, 0, reversed);
-            print("input_count: %\n", input_count);
             dest.input_coverages = NewArray(input_count, Font_Coverage_Table);
-            for 0..input_count-1 {
-                print("input iteration: %\n", it);
-                dest.input_coverages[it] = read_coverage_table(input_table + 2 + it * 2, reversed);
-                print("input coverage table: %\n", dest.input_coverages[it]);
+            if input_count for 0..input_count-1 {
+                offs := read2_from_offset(input_table, 2 + it * 2, reversed);
+                tbl := chained_seq_table + offs;
+                dest.input_coverages[it] = read_coverage_table(tbl, reversed);
             }
             
             lookahead_table := input_table + 2 + input_count * 2;
             lookahead_count := read2_from_offset(lookahead_table, 0, reversed);
             dest.lookahead_coverages = NewArray(lookahead_count, Font_Coverage_Table);
-            for 0..lookahead_count-1 {
-                dest.lookahead_coverages[it] = read_coverage_table(lookahead_table + 2 + it * 2, reversed);
+            if lookahead_count for 0..lookahead_count-1 {
+                offs := read2_from_offset(lookahead_table,2 + it * 2, reversed);
+                tbl := chained_seq_table + offs;
+                dest.lookahead_coverages[it] = read_coverage_table(tbl, reversed);
             }
             lookup_table := lookahead_table + 2 + lookahead_count * 2;
             lookup_count := read2_from_offset(lookup_table, 0, reversed);
