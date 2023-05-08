@@ -252,14 +252,15 @@ dbg_dump_font :: (font: *Dynamic_Font)
     print("  Face: %\n", <<font.face);
     print(" Family: %\n", <<font.face.family_name); 
 
-    feat: string = "abcd";
-    for * font.features {   feat[0] = xx it.feature_tag>>24&0xFF;
-                            feat[1] = xx it.feature_tag>>16&0xFF;
-                            feat[2] = xx it.feature_tag>>8&0xFF;
-                            feat[3] = xx it.feature_tag>>0&0xFF;
-                            print("  Feature: %\n", feat);
-                            print("lookup_tables: %\n", it.lookup_tables);
-                        }
+    // feat: string = "abcd";
+    // for * font.features {   feat[0] = xx it.feature_tag>>24&0xFF;
+    //                         feat[1] = xx it.feature_tag>>16&0xFF;
+    //                         feat[2] = xx it.feature_tag>>8&0xFF;
+    //                         feat[3] = xx it.feature_tag>>0&0xFF;
+    //                         print("  Feature: %\n", feat);
+    //                         print("lookup_tables: %\n", it.lookup_tables);
+    //                     }
+
 
 }
 
@@ -272,14 +273,22 @@ find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
     glyph := find_or_create_glyph(font, utf32);
     for font.feature_ctxual_alts.lookup_tables {
         for sub : it.subtables {
+            print("SUBTABLE %\n", sub);
             if sub.format == {
                 case 1; {
                     for g : sub.coverage_table.glyphs {
                         if glyph.glyph_index_within_font == g {
-                            print("FORMAT1 FOUND %, sequence table cnt %\n", g, sub.chained_sequence_tables.count);
+                           // print("FORMAT1 FOUND %, sequence table cnt %\n", g, sub.chained_sequence_tables.count);
+                           for seq : sub.chained_sequence_tables {
+                        //    print("sequence lookup records %\n", seq.lookup_records);
+                                if seq.lookup_records.count > 0 {
+                        //            print("replacing glyph\n");
+                                    glyph = find_or_create_glyph(font, seq.lookup_records[0].lookup_list_index);
+                                }
+                            }
                         }
                     }         
-                }
+                } 
                 case 3; {
                     for seq : sub.chained_sequence_tables {
                         for cov : seq.input_coverages {
@@ -1182,7 +1191,7 @@ expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: 
                 sub_dest.chained_sequence_tables = NewArray(rule_count, Font_Chained_Sequence_Table_Entry);
                 //for * sub_dest.chained_sequence_tables {
                 for j : 0..rule_count-1 {
-                    tbl := sub_dest.chained_sequence_tables[j];
+                    tbl := *sub_dest.chained_sequence_tables[j];
                     rule_offset := read2_from_offset(ruleset_table, 2 + j * 2, reversed);
 
                     backtrack_table := ruleset_table + rule_offset;
@@ -1196,19 +1205,17 @@ expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: 
                     lookahead_table := input_table + 2 + input_cnt * 2;
                     read_sequence_table_entry(*tbl.lookahead, lookahead_table, reversed);
 
-                    print("lookahead -> %\n", tbl.lookahead);
                     lookup_table := lookahead_table + 2 + tbl.lookahead.glyphs.count * 2 ;
-
                     lookup_count := read2_from_offset(lookup_table, 0, reversed);
                     tbl.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
+
                     if lookup_count for k : 0..lookup_count-1 {
-                        rec := tbl.lookup_records[k];
+                        rec := *tbl.lookup_records[k];
                         rec.sequence_index = read2_from_offset(lookup_table, 2 + k * 2, reversed);
                         rec.lookup_list_index = read2_from_offset(lookup_table, 4 + k * 2 , reversed);
+                        print("lookup record: %\n", rec);
                     }
-                    print("rule %, backtrack %, input %, inputcnt %, lookahead %\n", j, tbl.backtrack.glyphs, tbl.input.glyphs, input_cnt, tbl.lookahead.glyphs);
                 }
-
             }
         case 2; //class-based glyph context
             log_error("Found chained sequence lookup FORMAT 2\n");
