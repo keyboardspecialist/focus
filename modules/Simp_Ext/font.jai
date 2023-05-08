@@ -274,16 +274,12 @@ find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
         for sub : it.subtables {
             if sub.format == {
                 case 1; {
-                    for seq : sub.chained_sequence_tables {
-                        for g : seq.input.glyphs {
-                            if glyph.glyph_index_within_font == g {
-                                print("FORMAT1 FOUND % [%] [%]\n", g, seq.backtrack.glyphs, seq.lookahead.glyphs);
-                            }
+                    for g : sub.coverage_table.glyphs {
+                        if glyph.glyph_index_within_font == g {
+                            print("FORMAT1 FOUND %, sequence table cnt %\n", g, sub.chained_sequence_tables.count);
                         }
-                    }
-                    
+                    }         
                 }
-
                 case 3; {
                     for seq : sub.chained_sequence_tables {
                         for cov : seq.input_coverages {
