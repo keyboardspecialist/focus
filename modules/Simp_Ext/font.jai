@@ -98,7 +98,7 @@ Font_Lookup_Subtable :: struct {
     sequence_table: [] Font_Sequence_Table_Entry;       // If lookup type 2, table format 1
     
     //generally how ligatures are done. some sequence of glyphs is replaced with a single glyph.
-    chained_sequence_tables: [] Font_Chained_Sequence_Table_Entry; // If lookup type 6, table format 1
+    chained_sequence_tables: [] Font_Chained_Sequence_Table_Entry; // If lookup type 6, table format 1,2,3
 };
 
 Font_Chained_Sequence_Table_Entry :: struct {
@@ -262,6 +262,44 @@ dbg_dump_font :: (font: *Dynamic_Font)
                         }
 
 }
+
+find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
+    if !font.feature_ctxual_alts return false;
+    if font.feature_ctxual_alts.expanded == false return false;
+    if font.feature_ctxual_alts.lookup_tables.count == 0 return false;
+
+    utf32 := character_utf8_to_utf32(pos, line.data + line.count - pos);
+    glyph := find_or_create_glyph(font, utf32);
+    for font.feature_ctxual_alts.lookup_tables {
+        for sub : it.subtables {
+            if sub.format == {
+                case 1; {
+                    for seq : sub.chained_sequence_tables {
+                        for g : seq.input.glyphs {
+                            if glyph.glyph_index_within_font == g {
+                                print("FORMAT1 FOUND % [%] [%]\n", g, seq.backtrack.glyphs, seq.lookahead.glyphs);
+                            }
+                        }
+                    }
+                    
+                }
+
+                case 3; {
+                    for seq : sub.chained_sequence_tables {
+                        for cov : seq.input_coverages {
+                            for g : cov.glyphs {
+                                if glyph.glyph_index_within_font == g {
+                                    print("FORMAT3 FOUND %\n", g);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
 #scope_module
 
 draw_code :: (font: *Dynamic_Font, x: s64, y: s64, char_size: float, line_height: float, visible_lines: [] Code_Line, color_map: [] Vector4, tab_size: s64 = 4) {
@@ -295,6 +333,7 @@ draw_code :: (font: *Dynamic_Font, x: s64, y: s64, char_size: float, line_height
             // Convert current char to glyph
             utf32 := character_utf8_to_utf32(t, line.data + line.count - t);
             glyph := find_or_create_glyph(font, utf32);
+            yes := find_calt_glyph(font, line, t);
             assert(glyph != null, "find_or_create_glyph returned null");
             assert(glyph.page != null, "glyph has no font page");
 
@@ -1029,7 +1068,6 @@ read_coverage_table :: (coverage_table: *u8, reversed: bool) -> *Font_Coverage_T
 
 read_sequence_table_entry :: (result: *Font_Sequence_Table_Entry, sequence_table: *u8, reversed: bool) {
     num_glyphs := read2_from_offset(sequence_table, 0, reversed);
-
     result.glyphs = NewArray(num_glyphs, u16, false);
     if !result.glyphs.data return;
 
@@ -1146,23 +1184,38 @@ expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: 
                 ruleset_table := chained_seq_table + offset;
                 rule_count := read2_from_offset(ruleset_table, 0, reversed);
                 sub_dest.chained_sequence_tables = NewArray(rule_count, Font_Chained_Sequence_Table_Entry);
-                for * sub_dest.chained_sequence_tables {
-                    read_sequence_table_entry(*it.backtrack, ruleset_table + 2, reversed);
+                //for * sub_dest.chained_sequence_tables {
+                for j : 0..rule_count-1 {
+                    tbl := sub_dest.chained_sequence_tables[j];
+                    rule_offset := read2_from_offset(ruleset_table, 2 + j * 2, reversed);
+
+                    backtrack_table := ruleset_table + rule_offset;
+                    read_sequence_table_entry(*tbl.backtrack, backtrack_table, reversed);
                     //input is odd, skip the first glyph??
-                    read_sequence_table_entry(*it.input, ruleset_table + 4 + it.backtrack.glyphs.count * 2, reversed);
-                    read_sequence_table_entry(*it.lookahead, ruleset_table + 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2, reversed);
-                    lookup_count := read2_from_offset(ruleset_table, 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2 + 2 + it.lookahead.glyphs.count * 2, reversed);
-                    it.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
-                    lookup_table := 2 + it.backtrack.glyphs.count * 2 + 2 + it.input.glyphs.count * 2 + 2 + it.lookahead.glyphs.count * 2 ;
-                    for * it.lookup_records {
-                        it.sequence_index = read2_from_offset(ruleset_table, lookup_table + it_index * 2, reversed);
-                        it.lookup_list_index = read2_from_offset(ruleset_table, lookup_table + lookup_count * 2 + it_index * 2, reversed);
+                    input_table := backtrack_table + 2 + tbl.backtrack.glyphs.count * 2;   
+                    input_cnt := read2_from_offset(input_table, 0, reversed) - 1;
+                    if input_cnt {
+                        read_sequence_table_entry(*tbl.input, input_table, reversed);
+                    }            
+                    lookahead_table := input_table + 2 + input_cnt * 2;
+                    read_sequence_table_entry(*tbl.lookahead, lookahead_table, reversed);
+
+                    print("lookahead -> %\n", tbl.lookahead);
+                    lookup_table := lookahead_table + 2 + tbl.lookahead.glyphs.count * 2 ;
+
+                    lookup_count := read2_from_offset(lookup_table, 0, reversed);
+                    tbl.lookup_records = NewArray(lookup_count, Font_Lookup_Record);
+                    if lookup_count for k : 0..lookup_count-1 {
+                        rec := tbl.lookup_records[k];
+                        rec.sequence_index = read2_from_offset(lookup_table, 2 + k * 2, reversed);
+                        rec.lookup_list_index = read2_from_offset(lookup_table, 4 + k * 2 , reversed);
                     }
+                    print("rule %, backtrack %, input %, inputcnt %, lookahead %\n", j, tbl.backtrack.glyphs, tbl.input.glyphs, input_cnt, tbl.lookahead.glyphs);
                 }
 
             }
         case 2; //class-based glyph context
-            print("Found chained sequence lookup FORMAT 2\n");
+            log_error("Found chained sequence lookup FORMAT 2\n");
             assert(false);
 
         case 3; //coverage-based glyph context. Fira Code uses this format exclusively
