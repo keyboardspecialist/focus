@@ -264,26 +264,39 @@ dbg_dump_font :: (font: *Dynamic_Font)
 
 }
 
-find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
-    if !font.feature_ctxual_alts return false;
-    if font.feature_ctxual_alts.expanded == false return false;
-    if font.feature_ctxual_alts.lookup_tables.count == 0 return false;
+find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool, u32 {
+    if !font.feature_ctxual_alts return false, 0;
+    if font.feature_ctxual_alts.expanded == false return false, 0;
+    if font.feature_ctxual_alts.lookup_tables.count == 0 return false, 0;
 
     utf32 := character_utf8_to_utf32(pos, line.data + line.count - pos);
-    glyph := find_or_create_glyph(font, utf32);
+    og := find_or_create_glyph(font, utf32);
     for font.feature_ctxual_alts.lookup_tables {
         for sub : it.subtables {
-            print("SUBTABLE %\n", sub);
+            //print("SUBTABLE %\n", sub);
             if sub.format == {
                 case 1; {
                     for g : sub.coverage_table.glyphs {
-                        if glyph.glyph_index_within_font == g {
+                        if og.glyph_index_within_font == g {
                            // print("FORMAT1 FOUND %, sequence table cnt %\n", g, sub.chained_sequence_tables.count);
                            for seq : sub.chained_sequence_tables {
-                        //    print("sequence lookup records %\n", seq.lookup_records);
+                           print("sequence lookup records %\n", seq.lookup_records);
                                 if seq.lookup_records.count > 0 {
-                        //            print("replacing glyph\n");
-                                    glyph = find_or_create_glyph(font, seq.lookup_records[0].lookup_list_index);
+                                    idx := seq.lookup_records[0].lookup_list_index;
+                                    //glyph := find_or_create_glyph(font, seq.lookup_records[0].lookup_list_index);
+                                    err := FT_Load_Glyph(font.face, idx, FT_LOAD_DEFAULT);
+                                    assert(!err);
+                                    FT_Render_Glyph(font.face.glyph, .FT_RENDER_MODE_LCD);
+                                    data := cast(*Glyph_Data) get(*glyph_and_line_pool, size_of(Glyph_Data));
+                                    data.utf32 = utf32;
+                                    data.glyph_index_within_font = idx;
+                                    print("%\n", <<font.face.glyph);
+
+                                    copy_glyph_to_bitmap(font.face, data);
+
+                                    table_add(*font.glyph_lookup, idx, data);
+
+                                    return true, idx;
                                 }
                             }
                         }
@@ -293,7 +306,7 @@ find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
                     for seq : sub.chained_sequence_tables {
                         for cov : seq.input_coverages {
                             for g : cov.glyphs {
-                                if glyph.glyph_index_within_font == g {
+                                if og.glyph_index_within_font == g {
                                     print("FORMAT3 FOUND %\n", g);
                                 }
                             }
@@ -303,7 +316,7 @@ find_calt_glyph :: (font: *Dynamic_Font, line: string, pos: *u8 ) -> bool {
             }
         }
     }
-    return false;
+    return false, 0;
 }
 #scope_module
 
@@ -336,9 +349,11 @@ draw_code :: (font: *Dynamic_Font, x: s64, y: s64, char_size: float, line_height
         t := line.data;
         while t < line.data + line.count {
             // Convert current char to glyph
+            yes, calt_idx := find_calt_glyph(font, line, t);
             utf32 := character_utf8_to_utf32(t, line.data + line.count - t);
+         //   utf32 := character_utf8_to_utf32(t, line.data + line.count - t);
             glyph := find_or_create_glyph(font, utf32);
-            yes := find_calt_glyph(font, line, t);
+            
             assert(glyph != null, "find_or_create_glyph returned null");
             assert(glyph.page != null, "glyph has no font page");
 
@@ -966,7 +981,12 @@ copy_glyph_to_bitmap :: (face: FT_Face, data: *Glyph_Data) {
 }
 
 find_or_create_glyph :: (using font: *Dynamic_Font, utf32: u32) -> *Glyph_Data {
-    hash_key := utf32;
+    glyph_index := FT_Get_Char_Index(face, utf32);
+    if !glyph_index {
+        log_error("Unable to find a glyph in font '%' for utf32 character %.\n", name, utf32);
+        glyph_index = glyph_index_for_unknown_character;
+    }
+    hash_key := glyph_index;
 
     data, success := table_find(*font.glyph_lookup, hash_key);
     if success  return data;
@@ -974,11 +994,6 @@ find_or_create_glyph :: (using font: *Dynamic_Font, utf32: u32) -> *Glyph_Data {
     if utf32 == #char "\t" then utf32 = #char "→";  // draw tabs as arrows
     if utf32 == #char "\n" then utf32 = #char "¶";  // draw newlines as paragraph symbols
     
-    glyph_index := FT_Get_Char_Index(face, utf32);
-    if !glyph_index {
-        log_error("Unable to find a glyph in font '%' for utf32 character %.\n", name, utf32);
-        glyph_index = glyph_index_for_unknown_character;
-    }
     // error := FT_Load_Glyph(face, glyph_index, FT_LOAD_RENDER);
     error := FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
     assert(!error);
@@ -1212,8 +1227,7 @@ expand_chained_sequence :: (sub_dest: *Font_Lookup_Subtable, chained_seq_table: 
                     if lookup_count for k : 0..lookup_count-1 {
                         rec := *tbl.lookup_records[k];
                         rec.sequence_index = read2_from_offset(lookup_table, 2 + k * 2, reversed);
-                        rec.lookup_list_index = read2_from_offset(lookup_table, 4 + k * 2 , reversed);
-                        print("lookup record: %\n", rec);
+                        rec.lookup_list_index = read2_from_offset(lookup_table, 4 + k * 2, reversed);
                     }
                 }
             }
